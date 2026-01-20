@@ -2,9 +2,9 @@ name: C/C++ CI
 
 on:
   push:
-    branches: [ "master" ]
+    branches: ["master"]
   pull_request:
-    branches: [ "master" ]
+    branches: ["master"]
 
 jobs:
   build:
@@ -12,14 +12,17 @@ jobs:
     env:
       SOLUTION_FILE: 3DSound.sln
       CONFIGURATION: Release
-      PLATFORM: x64  # Win32 / x64 / Any CPU などに合わせて変更
+      PLATFORM: x64
+
+      # zip名
+      PACKAGE_NAME: 3DSound_${{ github.sha }}.zip
+
     steps:
       - uses: actions/checkout@v5
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
-      # .NET Framework / packages.config を使っている場合に有効（SDK-style中心なら不要なことも多い）
       - name: Setup NuGet.exe
         uses: NuGet/setup-nuget@v2
 
@@ -28,3 +31,60 @@ jobs:
 
       - name: Build
         run: msbuild $env:SOLUTION_FILE /m /t:Build /p:Configuration=$env:CONFIGURATION /p:Platform=$env:PLATFORM
+
+      # ---- ここから追加：exe + Data をまとめて zip ----
+      - name: Collect outputs (exe + Data)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          New-Item -ItemType Directory -Force dist | Out-Null
+
+          # 1) exe を探して dist にコピー（x64\Release 配下想定。必要ならパス調整してください）
+          $exe = Get-ChildItem -Recurse -Filter *.exe |
+            Where-Object { $_.FullName -match "\\$env:PLATFORM\\$env:CONFIGURATION\\" } |
+            Select-Object -First 1
+
+          if (-not $exe) { throw "Release exe not found. exeの出力先パスを workflow で調整してください。" }
+
+          Copy-Item $exe.FullName -Destination (Join-Path "dist" $exe.Name) -Force
+
+          # 2) リポジトリ直下に Data フォルダがある前提でコピー
+          if (Test-Path "Data") {
+            Copy-Item "Data" -Destination "dist\Data" -Recurse -Force
+          } else {
+            Write-Host "Data folder not found.（Data が別パスならここを修正）"
+          }
+
+      - name: Zip package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path $env:PACKAGE_NAME) { Remove-Item $env:PACKAGE_NAME -Force }
+          Compress-Archive -Path "dist\*" -DestinationPath $env:PACKAGE_NAME -Force
+
+      - name: Upload artifact (zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-package
+          path: ${{ env.PACKAGE_NAME }}
+
+      # ---- ここから追加：Teams 通知（成功/失敗どちらでも）----
+      - name: Notify Teams
+        if: always()
+        shell: pwsh
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $status = "${{ job.status }}"
+          $runUrl = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          $text = "GitHub Actions build **$status**`n`nRepo: ${{ github.repository }}`nBranch: ${{ github.ref_name }}`nCommit: ${{ github.sha }}`nArtifact: build-package ($env:PACKAGE_NAME)`nRun: $runUrl"
+
+          # Incoming Webhook はカード形式(JSON)を受け取る
+          $payload = @{
+            text = $text
+          } | ConvertTo-Json -Depth 5
+
+          Invoke-RestMethod -Method Post -Uri $env:TEAMS_WEBHOOK_URL -ContentType "application/json" -Body $payload
