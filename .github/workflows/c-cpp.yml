@@ -8,16 +8,23 @@ on:
 
 jobs:
   build:
-
-    runs-on: ubuntu-latest
-
+    runs-on: windows-2022
+    env:
+      SOLUTION_FILE: 3DSound.sln
+      CONFIGURATION: Release
+      PLATFORM: x64  # Win32 / x64 / Any CPU などに合わせて変更
     steps:
-    - uses: actions/checkout@v4
-    - name: configure
-      run: ./configure
-    - name: make
-      run: make
-    - name: make check
-      run: make check
-    - name: make distcheck
-      run: make distcheck
+      - uses: actions/checkout@v5
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      # .NET Framework / packages.config を使っている場合に有効（SDK-style中心なら不要なことも多い）
+      - name: Setup NuGet.exe
+        uses: NuGet/setup-nuget@v2
+
+      - name: Restore NuGet packages
+        run: nuget restore $env:SOLUTION_FILE
+
+      - name: Build
+        run: msbuild $env:SOLUTION_FILE /m /t:Build /p:Configuration=$env:CONFIGURATION /p:Platform=$env:PLATFORM
