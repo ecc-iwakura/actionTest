@@ -1,6 +1,6 @@
 name: C/C++ CI (MSBuild + Teams Notify)
 
-on:
+"on":
   push:
     branches: ["master"]
   pull_request:
@@ -15,7 +15,8 @@ jobs:
       PLATFORM: x64
 
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout
+        uses: actions/checkout@v5
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
@@ -24,15 +25,17 @@ jobs:
         uses: NuGet/setup-nuget@v2
 
       - name: Restore NuGet packages
-        run: nuget restore $env:SOLUTION_FILE
+        shell: pwsh
+        run: |
+          nuget restore $env:SOLUTION_FILE
 
-      # ビルドログを必ず msbuild.log に残す（成功/失敗どちらでも）
+      # 成功/失敗どちらでも msbuild.log にログを残す
       - name: Build
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
 
-          & msbuild $env:SOLUTION_FILE /m /t:Build /p:Configuration=$env:CONFIGURATION /p:Platform=$env:PLATFORM 2>&1 |
+          msbuild $env:SOLUTION_FILE /m /t:Build /p:Configuration=$env:CONFIGURATION /p:Platform=$env:PLATFORM 2>&1 |
             Tee-Object -FilePath msbuild.log
 
           $exitCode = $LASTEXITCODE
@@ -41,8 +44,8 @@ jobs:
             exit $exitCode
           }
 
-      # 成功/失敗でメッセージ内容を変えて Webhook に送信
-      - name: Notify Teams (success/failure message)
+      # 成功/失敗で text の中身を切り替えて Webhook に送る（Power Automate 側は triggerBody()?['text'] を投稿）
+      - name: Notify Teams
         if: always()
         shell: pwsh
         env:
@@ -50,18 +53,11 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $status = "${{ job.status }}"  # success / failure / cancelled
+          $status = "${{ job.status }}"   # success / failure / cancelled
           $runUrl = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
           if ($status -eq "success") {
-            $text = @"
-GitHub Actions build **$status**
-
-Repo: ${{ github.repository }}
-Branch: ${{ github.ref_name }}
-Commit: ${{ github.sha }}
-Run: $runUrl
-"@
+            $text = "GitHub Actions build **$status**`n`nRepo: ${{ github.repository }}`nBranch: ${{ github.ref_name }}`nCommit: ${{ github.sha }}`nRun: $runUrl"
           }
           elseif ($status -eq "failure") {
             $err = ""
@@ -83,25 +79,11 @@ Run: $runUrl
               $err = "(msbuild.log not found)"
             }
 
-            $text = @"
-GitHub Actions build **$status**
-
-$err
-
-Run: $runUrl
-"@
+            $text = "GitHub Actions build **$status**`n`n$err`n`nRun: $runUrl"
           }
           else {
-            $text = @"
-GitHub Actions build **$status**
-
-Repo: ${{ github.repository }}
-Branch: ${{ github.ref_name }}
-Commit: ${{ github.sha }}
-Run: $runUrl
-"@
+            $text = "GitHub Actions build **$status**`n`nRepo: ${{ github.repository }}`nBranch: ${{ github.ref_name }}`nCommit: ${{ github.sha }}`nRun: $runUrl"
           }
 
-          # Power Automate 側で triggerBody()?['text'] を投稿する想定
           $payload = @{ text = $text } | ConvertTo-Json -Depth 5
           Invoke-RestMethod -Method Post -Uri $env:TEAMS_WEBHOOK_URL -ContentType "application/json" -Body $payload
