@@ -1,4 +1,4 @@
-name: C/C++ CI
+name: C/C++ CI (MSBuild + Teams Notify)
 
 on:
   push:
@@ -14,9 +14,6 @@ jobs:
       CONFIGURATION: Release
       PLATFORM: x64
 
-      # zip名
-      PACKAGE_NAME: 3DSound_${{ github.sha }}.zip
-
     steps:
       - uses: actions/checkout@v5
 
@@ -29,48 +26,23 @@ jobs:
       - name: Restore NuGet packages
         run: nuget restore $env:SOLUTION_FILE
 
+      # ビルドログを必ず msbuild.log に残す（成功/失敗どちらでも）
       - name: Build
-        run: msbuild $env:SOLUTION_FILE /m /t:Build /p:Configuration=$env:CONFIGURATION /p:Platform=$env:PLATFORM
-
-      # ---- ここから追加：exe + Data をまとめて zip ----
-      - name: Collect outputs (exe + Data)
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = "Continue"
 
-          New-Item -ItemType Directory -Force dist | Out-Null
+          & msbuild $env:SOLUTION_FILE /m /t:Build /p:Configuration=$env:CONFIGURATION /p:Platform=$env:PLATFORM 2>&1 |
+            Tee-Object -FilePath msbuild.log
 
-          # 1) exe を探して dist にコピー（x64\Release 配下想定。必要ならパス調整してください）
-          $exe = Get-ChildItem -Recurse -Filter *.exe |
-            Where-Object { $_.FullName -match "\\$env:PLATFORM\\$env:CONFIGURATION\\" } |
-            Select-Object -First 1
-
-          if (-not $exe) { throw "Release exe not found. exeの出力先パスを workflow で調整してください。" }
-
-          Copy-Item $exe.FullName -Destination (Join-Path "dist" $exe.Name) -Force
-
-          # 2) リポジトリ直下に Data フォルダがある前提でコピー
-          if (Test-Path "Data") {
-            Copy-Item "Data" -Destination "dist\Data" -Recurse -Force
-          } else {
-            Write-Host "Data folder not found.（Data が別パスならここを修正）"
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) {
+            Write-Host "MSBuild failed with exit code $exitCode"
+            exit $exitCode
           }
 
-      - name: Zip package
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          if (Test-Path $env:PACKAGE_NAME) { Remove-Item $env:PACKAGE_NAME -Force }
-          Compress-Archive -Path "dist\*" -DestinationPath $env:PACKAGE_NAME -Force
-
-      - name: Upload artifact (zip)
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-package
-          path: ${{ env.PACKAGE_NAME }}
-
-      # ---- ここから追加：Teams 通知（成功/失敗どちらでも）----
-      - name: Notify Teams
+      # 成功/失敗でメッセージ内容を変えて Webhook に送信
+      - name: Notify Teams (success/failure message)
         if: always()
         shell: pwsh
         env:
@@ -78,13 +50,58 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $status = "${{ job.status }}"
+          $status = "${{ job.status }}"  # success / failure / cancelled
           $runUrl = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          $text = "GitHub Actions build **$status**`n`nRepo: ${{ github.repository }}`nBranch: ${{ github.ref_name }}`nCommit: ${{ github.sha }}`nArtifact: build-package ($env:PACKAGE_NAME)`nRun: $runUrl"
 
-          # Incoming Webhook はカード形式(JSON)を受け取る
-          $payload = @{
-            text = $text
-          } | ConvertTo-Json -Depth 5
+          if ($status -eq "success") {
+            $text = @"
+GitHub Actions build **$status**
 
+Repo: ${{ github.repository }}
+Branch: ${{ github.ref_name }}
+Commit: ${{ github.sha }}
+Run: $runUrl
+"@
+          }
+          elseif ($status -eq "failure") {
+            $err = ""
+
+            if (Test-Path "msbuild.log") {
+              # MSBuild のエラー行を抽出（必要ならパターン調整）
+              $lines = Select-String -Path "msbuild.log" -Pattern ": error " |
+                Select-Object -ExpandProperty Line
+
+              if (-not $lines) {
+                # エラー行が拾えない場合は末尾を送る
+                $lines = Get-Content "msbuild.log" -Tail 80
+              }
+
+              # Teams に貼るので長すぎないように制限
+              $err = ($lines | Select-Object -First 40) -join "`n"
+            }
+            else {
+              $err = "(msbuild.log not found)"
+            }
+
+            $text = @"
+GitHub Actions build **$status**
+
+$err
+
+Run: $runUrl
+"@
+          }
+          else {
+            $text = @"
+GitHub Actions build **$status**
+
+Repo: ${{ github.repository }}
+Branch: ${{ github.ref_name }}
+Commit: ${{ github.sha }}
+Run: $runUrl
+"@
+          }
+
+          # Power Automate 側で triggerBody()?['text'] を投稿する想定
+          $payload = @{ text = $text } | ConvertTo-Json -Depth 5
           Invoke-RestMethod -Method Post -Uri $env:TEAMS_WEBHOOK_URL -ContentType "application/json" -Body $payload
