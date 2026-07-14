@@ -2,31 +2,31 @@ name: Build C++ Project
 
 # ============================================================
 # 共通設定
-# プロジェクトに合わせて、基本的にはこの部分を変更します
+# プロジェクトに合わせて、この部分を変更します
 # ============================================================
 env:
-  # ソリューションファイル
-  SOLUTION_FILE: 3DSound.sln
+  # ソリューションファイルのパス
+  SOLUTION_FILE: SampleGame.sln
 
   # プロジェクト名
-  PROJECT_NAME: 3DSound
+  PROJECT_NAME: SampleGame
 
   # ビルド構成
   BUILD_CONFIGURATION: Release
 
-  # プラットフォーム
+  # ビルド対象プラットフォーム
   BUILD_PLATFORM: x64
 
-  # GitHub Actions上で使用する出力フォルダ
+  # GitHub Actions上で使用するビルド出力先
   BUILD_OUTPUT_DIRECTORY: BuildOutput
 
-  # 配布用フォルダ
+  # Artifactとして登録する前に成果物をまとめるフォルダ
   PACKAGE_DIRECTORY: Artifact
 
-  # 成果物名
-  ARTIFACT_NAME: 3DSound-Windows-x64
+  # GitHub Actions上に表示される成果物名
+  ARTIFACT_NAME: SampleGame-Windows-x64
 
-  # 保存日数
+  # 成果物の保存日数
   ARTIFACT_RETENTION_DAYS: 30
 
 # ============================================================
@@ -38,12 +38,12 @@ on:
     branches:
       - main
 
-  # mainブランチへのPull Requestが作成・更新されたとき
+  # mainブランチへのPull Request時
   pull_request:
     branches:
       - main
 
-  # GitHubのActions画面から手動実行できるようにする
+  # Actions画面から手動実行
   workflow_dispatch:
 
 # ============================================================
@@ -62,14 +62,14 @@ jobs:
         uses: actions/checkout@v4
 
       # ------------------------------------------------------
-      # MSBuildを使用できるようにする
+      # MSBuildを使用可能にする
       # ------------------------------------------------------
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
       # ------------------------------------------------------
       # NuGetパッケージを復元
-      # 使用していない場合でも、失敗しないようにしています
+      # NuGetを使用していない場合は、この処理を削除できます
       # ------------------------------------------------------
       - name: Restore NuGet packages
         shell: pwsh
@@ -80,11 +80,12 @@ jobs:
 
           if ($LASTEXITCODE -ne 0) {
               Write-Warning "NuGet restoreに失敗しました。"
-              Write-Warning "NuGetを使用していないプロジェクトの場合は、この警告を無視できます。"
+              Write-Warning "NuGetを使用していない場合は、このステップを削除してください。"
           }
 
       # ------------------------------------------------------
-      # C++プロジェクトをビルド
+      # C++ソリューションをビルド
+      # OutDirを指定し、成果物をBuildOutputへ集約する
       # ------------------------------------------------------
       - name: Build solution
         shell: pwsh
@@ -93,20 +94,20 @@ jobs:
           $configuration = "${{ env.BUILD_CONFIGURATION }}"
           $platform = "${{ env.BUILD_PLATFORM }}"
 
-          # GitHub Actionsの作業フォルダを基準に絶対パスを作成
           $outputDirectory = Join-Path `
             "${{ github.workspace }}" `
             "${{ env.BUILD_OUTPUT_DIRECTORY }}"
 
-          # MSBuildのOutDirでは末尾の\を付ける
+          # MSBuildのOutDirは末尾に\を付ける
           $outputDirectory = "$outputDirectory\"
 
           Write-Host "========================================"
           Write-Host "C++プロジェクトをビルドします"
-          Write-Host "ソリューション : $solutionFile"
-          Write-Host "構成           : $configuration"
-          Write-Host "プラットフォーム: $platform"
-          Write-Host "出力先         : $outputDirectory"
+          Write-Host "ソリューション   : $solutionFile"
+          Write-Host "プロジェクト名   : ${{ env.PROJECT_NAME }}"
+          Write-Host "構成             : $configuration"
+          Write-Host "プラットフォーム : $platform"
+          Write-Host "出力先           : $outputDirectory"
           Write-Host "========================================"
 
           msbuild "$solutionFile" `
@@ -123,7 +124,7 @@ jobs:
           }
 
       # ------------------------------------------------------
-      # 出力フォルダの確認
+      # ビルド出力を確認
       # ------------------------------------------------------
       - name: Check build output
         shell: pwsh
@@ -136,22 +137,26 @@ jobs:
           Write-Host "出力先: $outputDirectory"
 
           if (-not (Test-Path $outputDirectory)) {
-              Write-Host "ビルド後に作成されたファイル:"
-              
+              Write-Host "ビルド後のファイル一覧:"
+
               Get-ChildItem `
                 -Path "${{ github.workspace }}" `
                 -Recurse `
                 -File `
                 -ErrorAction SilentlyContinue |
-              Select-Object FullName, Length
+              Select-Object FullName, Length |
+              Format-Table -AutoSize
 
               throw "ビルド出力フォルダが見つかりません: $outputDirectory"
           }
 
-          $outputFiles = Get-ChildItem `
-            -Path $outputDirectory `
-            -Recurse `
-            -File
+          $outputFiles = @(
+              Get-ChildItem `
+                -Path $outputDirectory `
+                -Recurse `
+                -File `
+                -ErrorAction SilentlyContinue
+          )
 
           if ($outputFiles.Count -eq 0) {
               throw "出力フォルダは存在しますが、ファイルがありません。"
@@ -161,6 +166,7 @@ jobs:
           $outputFiles |
             Select-Object FullName, Length |
             Format-Table -AutoSize
+
       # ------------------------------------------------------
       # 配布用フォルダを作成
       # ------------------------------------------------------
@@ -192,7 +198,7 @@ jobs:
             -Force |
           Out-Null
 
-          Write-Host "成果物をコピーします。"
+          Write-Host "成果物を配布用フォルダへコピーします。"
           Write-Host "コピー元: $sourceDirectory"
           Write-Host "コピー先: $packageDirectory"
 
@@ -202,74 +208,95 @@ jobs:
             -Recurse `
             -Force
 
-          Write-Host "コピーされたファイル:"
-          Get-ChildItem `
-            -Path $packageDirectory `
-            -Recurse `
-            -File |
-          Select-Object FullName, Length |
-          Format-Table -AutoSize
-
       # ------------------------------------------------------
-      # 不要なファイルを除外
-      # 必要に応じて追加・削除してください
+      # 不要なビルド用ファイルを削除
+      # pdbが必要な場合は、*.pdbを一覧から削除してください
       # ------------------------------------------------------
       - name: Remove unnecessary files
         shell: pwsh
         run: |
-          $packageDirectory = "${{ env.PACKAGE_DIRECTORY }}"
+          $packageDirectory = Join-Path `
+            "${{ github.workspace }}" `
+            "${{ env.PACKAGE_DIRECTORY }}"
 
-          $excludeExtensions = @(
+          $excludePatterns = @(
               "*.pdb",
               "*.ilk",
               "*.exp",
               "*.lib"
           )
 
-          foreach ($extension in $excludeExtensions) {
+          foreach ($pattern in $excludePatterns) {
               Get-ChildItem `
                 -Path $packageDirectory `
-                -Filter $extension `
+                -Filter $pattern `
                 -Recurse `
                 -File `
                 -ErrorAction SilentlyContinue |
               Remove-Item -Force
           }
 
+          $packageFiles = @(
+              Get-ChildItem `
+                -Path $packageDirectory `
+                -Recurse `
+                -File `
+                -ErrorAction SilentlyContinue
+          )
+
+          if ($packageFiles.Count -eq 0) {
+              throw "配布対象ファイルがありません。"
+          }
+
           Write-Host "配布対象ファイル:"
-          Get-ChildItem -Path $packageDirectory -Recurse -File |
-            Select-Object FullName, Length
+          $packageFiles |
+            Select-Object FullName, Length |
+            Format-Table -AutoSize
 
       # ------------------------------------------------------
-      # ZIPファイルを作成
+      # 必要なゲームデータをコピー
+      # 存在するフォルダのみコピーする
+      # 不要な場合は、このステップを削除できます
       # ------------------------------------------------------
-      - name: Create ZIP file
+      - name: Copy additional data
         shell: pwsh
         run: |
-          $packageDirectory = "${{ env.PACKAGE_DIRECTORY }}"
-          $zipFileName = "${{ env.ZIP_FILE_NAME }}"
+          $packageDirectory = Join-Path `
+            "${{ github.workspace }}" `
+            "${{ env.PACKAGE_DIRECTORY }}"
 
-          if (Test-Path $zipFileName) {
-              Remove-Item $zipFileName -Force
+          $additionalDirectories = @(
+              "Assets",
+              "Resources",
+              "Data"
+          )
+
+          foreach ($directoryName in $additionalDirectories) {
+              $sourcePath = Join-Path `
+                "${{ github.workspace }}" `
+                $directoryName
+
+              $destinationPath = Join-Path `
+                $packageDirectory `
+                $directoryName
+
+              if (Test-Path $sourcePath) {
+                  Write-Host "$directoryName をコピーします。"
+
+                  Copy-Item `
+                    -Path $sourcePath `
+                    -Destination $destinationPath `
+                    -Recurse `
+                    -Force
+              }
+              else {
+                  Write-Host "$directoryName は存在しないため、コピーを省略します。"
+              }
           }
-
-          Compress-Archive `
-            -Path "$packageDirectory\*" `
-            -DestinationPath $zipFileName `
-            -CompressionLevel Optimal
-
-          if (-not (Test-Path $zipFileName)) {
-              throw "ZIPファイルの作成に失敗しました。"
-          }
-
-          $zipFile = Get-Item $zipFileName
-
-          Write-Host "ZIPファイルを作成しました。"
-          Write-Host "ファイル名: $($zipFile.Name)"
-          Write-Host "サイズ: $($zipFile.Length) bytes"
 
       # ------------------------------------------------------
-      # GitHub Actionsへ成果物を登録
+      # 配布用フォルダをArtifactとして登録
+      # ダウンロード時にGitHub側でZIP化される
       # ------------------------------------------------------
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
