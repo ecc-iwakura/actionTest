@@ -10,10 +10,10 @@ env:
   # ----------------------------------------------------------
 
   # ソリューションファイルのパス
-  SOLUTION_FILE: SampleGame.sln
+  SOLUTION_FILE: 3DSound.sln
 
   # プロジェクト名
-  PROJECT_NAME: SampleGame
+  PROJECT_NAME: 3DSound
 
   # Debug または Release
   BUILD_CONFIGURATION: Release
@@ -48,7 +48,7 @@ env:
   PACKAGE_DIRECTORY: Artifact
 
   # GitHub Actions上に表示される成果物名
-  ARTIFACT_NAME: SampleGame-Windows-x64
+  ARTIFACT_NAME: 3DSound-Windows-x64
 
   # 成果物の保存日数
   ARTIFACT_RETENTION_DAYS: 30
