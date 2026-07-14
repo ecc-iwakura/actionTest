@@ -12,26 +12,21 @@ env:
   PROJECT_NAME: 3DSound
 
   # ビルド構成
-  # Debug または Release
   BUILD_CONFIGURATION: Release
 
   # プラットフォーム
-  # x64 / Win32 など
   BUILD_PLATFORM: x64
 
-  # Visual Studioプロジェクト側で設定されている出力先
-  BUILD_OUTPUT_DIRECTORY: x64/Release
+  # GitHub Actions上で使用する出力フォルダ
+  BUILD_OUTPUT_DIRECTORY: BuildOutput
 
-  # 成果物を一時的にまとめるフォルダ
+  # 配布用フォルダ
   PACKAGE_DIRECTORY: Artifact
 
-  # 作成するZIPファイル名
-  ZIP_FILE_NAME: 3DSound.zip
-
-  # GitHub Actions上に表示される成果物名
+  # 成果物名
   ARTIFACT_NAME: 3DSound-Windows-x64
 
-  # 成果物の保存日数
+  # 保存日数
   ARTIFACT_RETENTION_DAYS: 30
 
 # ============================================================
@@ -94,19 +89,33 @@ jobs:
       - name: Build solution
         shell: pwsh
         run: |
+          $solutionFile = "${{ env.SOLUTION_FILE }}"
+          $configuration = "${{ env.BUILD_CONFIGURATION }}"
+          $platform = "${{ env.BUILD_PLATFORM }}"
+
+          # GitHub Actionsの作業フォルダを基準に絶対パスを作成
+          $outputDirectory = Join-Path `
+            "${{ github.workspace }}" `
+            "${{ env.BUILD_OUTPUT_DIRECTORY }}"
+
+          # MSBuildのOutDirでは末尾の\を付ける
+          $outputDirectory = "$outputDirectory\"
+
           Write-Host "========================================"
           Write-Host "C++プロジェクトをビルドします"
-          Write-Host "ソリューション : ${{ env.SOLUTION_FILE }}"
-          Write-Host "構成           : ${{ env.BUILD_CONFIGURATION }}"
-          Write-Host "プラットフォーム: ${{ env.BUILD_PLATFORM }}"
+          Write-Host "ソリューション : $solutionFile"
+          Write-Host "構成           : $configuration"
+          Write-Host "プラットフォーム: $platform"
+          Write-Host "出力先         : $outputDirectory"
           Write-Host "========================================"
 
-          msbuild "${{ env.SOLUTION_FILE }}" `
+          msbuild "$solutionFile" `
             /m `
             /t:Rebuild `
-            /p:Configuration="${{ env.BUILD_CONFIGURATION }}" `
-            /p:Platform="${{ env.BUILD_PLATFORM }}" `
+            /p:Configuration="$configuration" `
+            /p:Platform="$platform" `
             /p:PlatformToolset=v143 `
+            /p:OutDir="$outputDirectory" `
             /verbosity:minimal
 
           if ($LASTEXITCODE -ne 0) {
@@ -119,41 +128,69 @@ jobs:
       - name: Check build output
         shell: pwsh
         run: |
-          $outputDirectory = "${{ env.BUILD_OUTPUT_DIRECTORY }}"
+          $outputDirectory = Join-Path `
+            "${{ github.workspace }}" `
+            "${{ env.BUILD_OUTPUT_DIRECTORY }}"
 
           Write-Host "ビルド出力先を確認します。"
           Write-Host "出力先: $outputDirectory"
 
           if (-not (Test-Path $outputDirectory)) {
-              Write-Host "現在のファイル一覧:"
-              Get-ChildItem -Path . -Recurse -File |
-                Select-Object FullName
+              Write-Host "ビルド後に作成されたファイル:"
+              
+              Get-ChildItem `
+                -Path "${{ github.workspace }}" `
+                -Recurse `
+                -File `
+                -ErrorAction SilentlyContinue |
+              Select-Object FullName, Length
 
               throw "ビルド出力フォルダが見つかりません: $outputDirectory"
           }
 
-          Write-Host "ビルド結果:"
-          Get-ChildItem -Path $outputDirectory -Recurse -File |
-            Select-Object FullName, Length
+          $outputFiles = Get-ChildItem `
+            -Path $outputDirectory `
+            -Recurse `
+            -File
 
+          if ($outputFiles.Count -eq 0) {
+              throw "出力フォルダは存在しますが、ファイルがありません。"
+          }
+
+          Write-Host "ビルド結果:"
+          $outputFiles |
+            Select-Object FullName, Length |
+            Format-Table -AutoSize
       # ------------------------------------------------------
       # 配布用フォルダを作成
       # ------------------------------------------------------
       - name: Prepare artifact directory
         shell: pwsh
         run: |
-          $sourceDirectory = "${{ env.BUILD_OUTPUT_DIRECTORY }}"
-          $packageDirectory = "${{ env.PACKAGE_DIRECTORY }}"
+          $sourceDirectory = Join-Path `
+            "${{ github.workspace }}" `
+            "${{ env.BUILD_OUTPUT_DIRECTORY }}"
+
+          $packageDirectory = Join-Path `
+            "${{ github.workspace }}" `
+            "${{ env.PACKAGE_DIRECTORY }}"
+
+          if (-not (Test-Path $sourceDirectory)) {
+              throw "コピー元フォルダが見つかりません: $sourceDirectory"
+          }
 
           if (Test-Path $packageDirectory) {
-              Remove-Item $packageDirectory -Recurse -Force
+              Remove-Item `
+                -Path $packageDirectory `
+                -Recurse `
+                -Force
           }
 
           New-Item `
             -ItemType Directory `
             -Path $packageDirectory `
             -Force |
-            Out-Null
+          Out-Null
 
           Write-Host "成果物をコピーします。"
           Write-Host "コピー元: $sourceDirectory"
@@ -164,6 +201,14 @@ jobs:
             -Destination $packageDirectory `
             -Recurse `
             -Force
+
+          Write-Host "コピーされたファイル:"
+          Get-ChildItem `
+            -Path $packageDirectory `
+            -Recurse `
+            -File |
+          Select-Object FullName, Length |
+          Format-Table -AutoSize
 
       # ------------------------------------------------------
       # 不要なファイルを除外
@@ -230,6 +275,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-          path: ${{ env.ZIP_FILE_NAME }}
+          path: ${{ env.PACKAGE_DIRECTORY }}
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
           if-no-files-found: error
