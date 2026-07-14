@@ -2,29 +2,53 @@ name: Build C++ Project
 
 # ============================================================
 # 共通設定
-# プロジェクトに合わせて、この部分を変更します
+# 基本的には、この部分をプロジェクトに合わせて変更します
 # ============================================================
 env:
+  # ----------------------------------------------------------
+  # C++プロジェクト設定
+  # ----------------------------------------------------------
+
   # ソリューションファイルのパス
-  SOLUTION_FILE: 3DSound.sln
+  SOLUTION_FILE: SampleGame.sln
 
   # プロジェクト名
-  PROJECT_NAME: 3DSound
+  PROJECT_NAME: SampleGame
 
-  # ビルド構成
+  # Debug または Release
   BUILD_CONFIGURATION: Release
 
-  # ビルド対象プラットフォーム
+  # x64 または Win32
   BUILD_PLATFORM: x64
 
-  # GitHub Actions上で使用するビルド出力先
+  # GitHub Actions上でのC++ビルド出力先
   BUILD_OUTPUT_DIRECTORY: BuildOutput
 
-  # Artifactとして登録する前に成果物をまとめるフォルダ
+  # ----------------------------------------------------------
+  # HLSL設定
+  # ----------------------------------------------------------
+
+  # コンパイル前のHLSLファイルを格納するフォルダ
+  HLSL_SOURCE_DIRECTORY: HLSL
+
+  # コンパイル済みシェーダーの出力先
+  SHADER_OUTPUT_DIRECTORY: Shader
+
+  # シェーダーのエントリーポイント
+  SHADER_ENTRY_POINT: main
+
+  # シェーダーモデル
+  SHADER_MODEL: "5_0"
+
+  # ----------------------------------------------------------
+  # Artifact設定
+  # ----------------------------------------------------------
+
+  # GitHubへアップロードするデータをまとめるフォルダ
   PACKAGE_DIRECTORY: Artifact
 
   # GitHub Actions上に表示される成果物名
-  ARTIFACT_NAME: 3DSound-Windows-x64
+  ARTIFACT_NAME: SampleGame-Windows-x64
 
   # 成果物の保存日数
   ARTIFACT_RETENTION_DAYS: 30
@@ -43,7 +67,7 @@ on:
     branches:
       - main
 
-  # Actions画面から手動実行
+  # GitHubのActions画面から手動実行
   workflow_dispatch:
 
 # ============================================================
@@ -69,7 +93,7 @@ jobs:
 
       # ------------------------------------------------------
       # NuGetパッケージを復元
-      # NuGetを使用していない場合は、この処理を削除できます
+      # NuGetを使用していない場合は削除可能
       # ------------------------------------------------------
       - name: Restore NuGet packages
         shell: pwsh
@@ -80,12 +104,11 @@ jobs:
 
           if ($LASTEXITCODE -ne 0) {
               Write-Warning "NuGet restoreに失敗しました。"
-              Write-Warning "NuGetを使用していない場合は、このステップを削除してください。"
+              Write-Warning "NuGetを使用していない場合、この警告は無視できます。"
           }
 
       # ------------------------------------------------------
       # C++ソリューションをビルド
-      # OutDirを指定し、成果物をBuildOutputへ集約する
       # ------------------------------------------------------
       - name: Build solution
         shell: pwsh
@@ -98,7 +121,7 @@ jobs:
             "${{ github.workspace }}" `
             "${{ env.BUILD_OUTPUT_DIRECTORY }}"
 
-          # MSBuildのOutDirは末尾に\を付ける
+          # MSBuildのOutDirには末尾の\を付ける
           $outputDirectory = "$outputDirectory\"
 
           Write-Host "========================================"
@@ -120,11 +143,11 @@ jobs:
             /verbosity:minimal
 
           if ($LASTEXITCODE -ne 0) {
-              throw "ビルドに失敗しました。終了コード: $LASTEXITCODE"
+              throw "C++プロジェクトのビルドに失敗しました。終了コード: $LASTEXITCODE"
           }
 
       # ------------------------------------------------------
-      # ビルド出力を確認
+      # C++ビルド出力を確認
       # ------------------------------------------------------
       - name: Check build output
         shell: pwsh
@@ -137,16 +160,6 @@ jobs:
           Write-Host "出力先: $outputDirectory"
 
           if (-not (Test-Path $outputDirectory)) {
-              Write-Host "ビルド後のファイル一覧:"
-
-              Get-ChildItem `
-                -Path "${{ github.workspace }}" `
-                -Recurse `
-                -File `
-                -ErrorAction SilentlyContinue |
-              Select-Object FullName, Length |
-              Format-Table -AutoSize
-
               throw "ビルド出力フォルダが見つかりません: $outputDirectory"
           }
 
@@ -159,13 +172,249 @@ jobs:
           )
 
           if ($outputFiles.Count -eq 0) {
-              throw "出力フォルダは存在しますが、ファイルがありません。"
+              throw "ビルド出力フォルダにファイルがありません。"
           }
 
-          Write-Host "ビルド結果:"
+          Write-Host "C++ビルド結果:"
+
           $outputFiles |
             Select-Object FullName, Length |
             Format-Table -AutoSize
+
+      # ------------------------------------------------------
+      # fxc.exeを検索
+      # ------------------------------------------------------
+      - name: Find HLSL compiler
+        id: find-fxc
+        shell: pwsh
+        run: |
+          $fxcPath = $null
+
+          # PATHに登録されているか確認
+          $fxcCommand = Get-Command `
+            "fxc.exe" `
+            -ErrorAction SilentlyContinue
+
+          if ($null -ne $fxcCommand) {
+              $fxcPath = $fxcCommand.Source
+          }
+
+          # PATHから見つからなければWindows SDK内を検索
+          if ([string]::IsNullOrWhiteSpace($fxcPath)) {
+              $windowsKitsRoot = Join-Path `
+                ${env:ProgramFiles(x86)} `
+                "Windows Kits\10\bin"
+
+              if (Test-Path $windowsKitsRoot) {
+                  $fxcFile = Get-ChildItem `
+                    -Path $windowsKitsRoot `
+                    -Filter "fxc.exe" `
+                    -Recurse `
+                    -File `
+                    -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $_.FullName -match '\\x64\\fxc\.exe$'
+                    } |
+                    Sort-Object FullName -Descending |
+                    Select-Object -First 1
+
+                  if ($null -ne $fxcFile) {
+                      $fxcPath = $fxcFile.FullName
+                  }
+              }
+          }
+
+          if ([string]::IsNullOrWhiteSpace($fxcPath)) {
+              throw "fxc.exeが見つかりません。Windows SDKのインストール状態を確認してください。"
+          }
+
+          Write-Host "HLSLコンパイラが見つかりました。"
+          Write-Host "fxc.exe: $fxcPath"
+
+          # 後続ステップから参照できるように環境変数へ登録
+          "FXC_PATH=$fxcPath" | Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Encoding utf8 `
+            -Append
+
+      # ------------------------------------------------------
+      # HLSLシェーダーをコンパイル
+      #
+      # ファイル名の末尾によって種類を判定する
+      #   *VS.hlsl -> vs_5_0
+      #   *PS.hlsl -> ps_5_0
+      #   *GS.hlsl -> gs_5_0
+      #   *HS.hlsl -> hs_5_0
+      #   *DS.hlsl -> ds_5_0
+      #   *CS.hlsl -> cs_5_0
+      # ------------------------------------------------------
+      - name: Compile HLSL shaders
+        shell: pwsh
+        run: |
+          $sourceDirectory = Join-Path `
+            "${{ github.workspace }}" `
+            "${{ env.HLSL_SOURCE_DIRECTORY }}"
+
+          $outputDirectory = Join-Path `
+            "${{ github.workspace }}" `
+            "${{ env.SHADER_OUTPUT_DIRECTORY }}"
+
+          $entryPoint = "${{ env.SHADER_ENTRY_POINT }}"
+          $shaderModel = "${{ env.SHADER_MODEL }}"
+          $fxcPath = "$env:FXC_PATH"
+
+          if (-not (Test-Path $sourceDirectory)) {
+              throw "HLSLフォルダが見つかりません: $sourceDirectory"
+          }
+
+          # 前回の出力が残っている場合は削除
+          if (Test-Path $outputDirectory) {
+              Remove-Item `
+                -Path $outputDirectory `
+                -Recurse `
+                -Force
+          }
+
+          New-Item `
+            -ItemType Directory `
+            -Path $outputDirectory `
+            -Force |
+          Out-Null
+
+          $shaderFiles = @(
+              Get-ChildItem `
+                -Path $sourceDirectory `
+                -Filter "*.hlsl" `
+                -Recurse `
+                -File
+          )
+
+          if ($shaderFiles.Count -eq 0) {
+              throw "コンパイル対象のHLSLファイルが見つかりません: $sourceDirectory"
+          }
+
+          $compiledShaderCount = 0
+
+          foreach ($shaderFile in $shaderFiles) {
+              $shaderType = $null
+
+              # ファイル名からシェーダーの種類を判定
+              switch -Regex ($shaderFile.BaseName) {
+                  '(?i)(VS|VertexShader)$' {
+                      $shaderType = "vs"
+                      break
+                  }
+
+                  '(?i)(PS|PixelShader)$' {
+                      $shaderType = "ps"
+                      break
+                  }
+
+                  '(?i)(GS|GeometryShader)$' {
+                      $shaderType = "gs"
+                      break
+                  }
+
+                  '(?i)(HS|HullShader)$' {
+                      $shaderType = "hs"
+                      break
+                  }
+
+                  '(?i)(DS|DomainShader)$' {
+                      $shaderType = "ds"
+                      break
+                  }
+
+                  '(?i)(CS|ComputeShader)$' {
+                      $shaderType = "cs"
+                      break
+                  }
+
+                  default {
+                      Write-Warning "種類を判定できないため、コンパイルを省略します: $($shaderFile.Name)"
+                      continue
+                  }
+              }
+
+              $targetProfile = "${shaderType}_${shaderModel}"
+
+              # HLSLフォルダ内の相対パスを取得
+              $relativePath = [System.IO.Path]::GetRelativePath(
+                  $sourceDirectory,
+                  $shaderFile.FullName
+              )
+
+              $relativeDirectory = Split-Path `
+                -Path $relativePath `
+                -Parent
+
+              # サブフォルダ構成をShader側にも維持
+              if ([string]::IsNullOrWhiteSpace($relativeDirectory)) {
+                  $shaderOutputDirectory = $outputDirectory
+              }
+              else {
+                  $shaderOutputDirectory = Join-Path `
+                    $outputDirectory `
+                    $relativeDirectory
+              }
+
+              New-Item `
+                -ItemType Directory `
+                -Path $shaderOutputDirectory `
+                -Force |
+              Out-Null
+
+              $outputFileName = "$($shaderFile.BaseName).cso"
+
+              $outputFilePath = Join-Path `
+                $shaderOutputDirectory `
+                $outputFileName
+
+              Write-Host "========================================"
+              Write-Host "HLSLをコンパイルします"
+              Write-Host "入力             : $($shaderFile.FullName)"
+              Write-Host "出力             : $outputFilePath"
+              Write-Host "エントリーポイント: $entryPoint"
+              Write-Host "プロファイル       : $targetProfile"
+              Write-Host "========================================"
+
+              & $fxcPath `
+                /nologo `
+                /T $targetProfile `
+                /E $entryPoint `
+                /Fo $outputFilePath `
+                /I $sourceDirectory `
+                /O3 `
+                /WX `
+                $shaderFile.FullName
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw "HLSLのコンパイルに失敗しました: $($shaderFile.FullName)"
+              }
+
+              if (-not (Test-Path $outputFilePath)) {
+                  throw "コンパイル済みシェーダーが作成されませんでした: $outputFilePath"
+              }
+
+              $compiledShaderCount++
+          }
+
+          if ($compiledShaderCount -eq 0) {
+              throw "コンパイルできるHLSLファイルがありませんでした。ファイル名の末尾を確認してください。"
+          }
+
+          Write-Host ""
+          Write-Host "$compiledShaderCount 個のシェーダーをコンパイルしました。"
+
+          Write-Host "コンパイル結果:"
+
+          Get-ChildItem `
+            -Path $outputDirectory `
+            -Filter "*.cso" `
+            -Recurse `
+            -File |
+          Select-Object FullName, Length |
+          Format-Table -AutoSize
 
       # ------------------------------------------------------
       # 配布用フォルダを作成
@@ -173,16 +422,24 @@ jobs:
       - name: Prepare artifact directory
         shell: pwsh
         run: |
-          $sourceDirectory = Join-Path `
+          $buildOutputDirectory = Join-Path `
             "${{ github.workspace }}" `
             "${{ env.BUILD_OUTPUT_DIRECTORY }}"
+
+          $shaderOutputDirectory = Join-Path `
+            "${{ github.workspace }}" `
+            "${{ env.SHADER_OUTPUT_DIRECTORY }}"
 
           $packageDirectory = Join-Path `
             "${{ github.workspace }}" `
             "${{ env.PACKAGE_DIRECTORY }}"
 
-          if (-not (Test-Path $sourceDirectory)) {
-              throw "コピー元フォルダが見つかりません: $sourceDirectory"
+          if (-not (Test-Path $buildOutputDirectory)) {
+              throw "C++ビルド出力フォルダが見つかりません: $buildOutputDirectory"
+          }
+
+          if (-not (Test-Path $shaderOutputDirectory)) {
+              throw "シェーダー出力フォルダが見つかりません: $shaderOutputDirectory"
           }
 
           if (Test-Path $packageDirectory) {
@@ -198,19 +455,72 @@ jobs:
             -Force |
           Out-Null
 
-          Write-Host "成果物を配布用フォルダへコピーします。"
-          Write-Host "コピー元: $sourceDirectory"
-          Write-Host "コピー先: $packageDirectory"
+          # C++のビルド結果をArtifact直下へコピー
+          Write-Host "C++ビルド結果をコピーします。"
 
           Copy-Item `
-            -Path "$sourceDirectory\*" `
+            -Path "$buildOutputDirectory\*" `
             -Destination $packageDirectory `
             -Recurse `
             -Force
 
+          # コンパイル済みShaderフォルダをコピー
+          $artifactShaderDirectory = Join-Path `
+            $packageDirectory `
+            "${{ env.SHADER_OUTPUT_DIRECTORY }}"
+
+          Write-Host "コンパイル済みシェーダーをコピーします。"
+          Write-Host "コピー元: $shaderOutputDirectory"
+          Write-Host "コピー先: $artifactShaderDirectory"
+
+          Copy-Item `
+            -Path $shaderOutputDirectory `
+            -Destination $artifactShaderDirectory `
+            -Recurse `
+            -Force
+
+      # ------------------------------------------------------
+      # 追加データをコピー
+      # 必要に応じてフォルダ名を追加・削除する
+      # ------------------------------------------------------
+      - name: Copy additional data
+        shell: pwsh
+        run: |
+          $packageDirectory = Join-Path `
+            "${{ github.workspace }}" `
+            "${{ env.PACKAGE_DIRECTORY }}"
+
+          $additionalDirectories = @(
+              "Assets",
+              "Resources",
+              "Data"
+          )
+
+          foreach ($directoryName in $additionalDirectories) {
+              $sourcePath = Join-Path `
+                "${{ github.workspace }}" `
+                $directoryName
+
+              $destinationPath = Join-Path `
+                $packageDirectory `
+                $directoryName
+
+              if (Test-Path $sourcePath) {
+                  Write-Host "$directoryName をコピーします。"
+
+                  Copy-Item `
+                    -Path $sourcePath `
+                    -Destination $destinationPath `
+                    -Recurse `
+                    -Force
+              }
+              else {
+                  Write-Host "$directoryName は存在しないため、コピーを省略します。"
+              }
+          }
+
       # ------------------------------------------------------
       # 不要なビルド用ファイルを削除
-      # pdbが必要な場合は、*.pdbを一覧から削除してください
       # ------------------------------------------------------
       - name: Remove unnecessary files
         shell: pwsh
@@ -248,51 +558,11 @@ jobs:
               throw "配布対象ファイルがありません。"
           }
 
-          Write-Host "配布対象ファイル:"
+          Write-Host "最終的な配布対象ファイル:"
+
           $packageFiles |
             Select-Object FullName, Length |
             Format-Table -AutoSize
-
-      # ------------------------------------------------------
-      # 必要なゲームデータをコピー
-      # 存在するフォルダのみコピーする
-      # 不要な場合は、このステップを削除できます
-      # ------------------------------------------------------
-      - name: Copy additional data
-        shell: pwsh
-        run: |
-          $packageDirectory = Join-Path `
-            "${{ github.workspace }}" `
-            "${{ env.PACKAGE_DIRECTORY }}"
-
-          $additionalDirectories = @(
-              "Assets",
-              "Resources",
-              "Data"
-          )
-
-          foreach ($directoryName in $additionalDirectories) {
-              $sourcePath = Join-Path `
-                "${{ github.workspace }}" `
-                $directoryName
-
-              $destinationPath = Join-Path `
-                $packageDirectory `
-                $directoryName
-
-              if (Test-Path $sourcePath) {
-                  Write-Host "$directoryName をコピーします。"
-
-                  Copy-Item `
-                    -Path $sourcePath `
-                    -Destination $destinationPath `
-                    -Recurse `
-                    -Force
-              }
-              else {
-                  Write-Host "$directoryName は存在しないため、コピーを省略します。"
-              }
-          }
 
       # ------------------------------------------------------
       # 配布用フォルダをArtifactとして登録
