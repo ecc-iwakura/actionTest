@@ -1,89 +1,235 @@
-name: C/C++ CI (MSBuild + Teams Notify)
+name: Build C++ Project
 
-"on":
+# ============================================================
+# 共通設定
+# プロジェクトに合わせて、基本的にはこの部分を変更します
+# ============================================================
+env:
+  # ソリューションファイル
+  SOLUTION_FILE: SampleGame.sln
+
+  # プロジェクト名
+  PROJECT_NAME: SampleGame
+
+  # ビルド構成
+  # Debug または Release
+  BUILD_CONFIGURATION: Release
+
+  # プラットフォーム
+  # x64 / Win32 など
+  BUILD_PLATFORM: x64
+
+  # Visual Studioプロジェクト側で設定されている出力先
+  BUILD_OUTPUT_DIRECTORY: x64/Release
+
+  # 成果物を一時的にまとめるフォルダ
+  PACKAGE_DIRECTORY: Artifact
+
+  # 作成するZIPファイル名
+  ZIP_FILE_NAME: SampleGame.zip
+
+  # GitHub Actions上に表示される成果物名
+  ARTIFACT_NAME: SampleGame-Windows-x64
+
+  # 成果物の保存日数
+  ARTIFACT_RETENTION_DAYS: 30
+
+# ============================================================
+# 実行条件
+# ============================================================
+on:
+  # mainブランチへpushされたとき
   push:
-    branches: ["master"]
-  pull_request:
-    branches: ["master"]
+    branches:
+      - main
 
+  # mainブランチへのPull Requestが作成・更新されたとき
+  pull_request:
+    branches:
+      - main
+
+  # GitHubのActions画面から手動実行できるようにする
+  workflow_dispatch:
+
+# ============================================================
+# ビルド処理
+# ============================================================
 jobs:
   build:
-    runs-on: windows-2022
-    env:
-      SOLUTION_FILE: 3DSound.sln
-      CONFIGURATION: Release
-      PLATFORM: x64
+    name: Build Windows x64
+    runs-on: windows-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      # ------------------------------------------------------
+      # リポジトリを取得
+      # ------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Add MSBuild to PATH
+      # ------------------------------------------------------
+      # MSBuildを使用できるようにする
+      # ------------------------------------------------------
+      - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Setup NuGet.exe
-        uses: NuGet/setup-nuget@v2
-
+      # ------------------------------------------------------
+      # NuGetパッケージを復元
+      # 使用していない場合でも、失敗しないようにしています
+      # ------------------------------------------------------
       - name: Restore NuGet packages
         shell: pwsh
         run: |
-          nuget restore $env:SOLUTION_FILE
+          Write-Host "NuGetパッケージを復元します。"
 
-      # 成功/失敗どちらでも msbuild.log にログを残す
-      - name: Build
+          nuget restore "${{ env.SOLUTION_FILE }}"
+
+          if ($LASTEXITCODE -ne 0) {
+              Write-Warning "NuGet restoreに失敗しました。"
+              Write-Warning "NuGetを使用していないプロジェクトの場合は、この警告を無視できます。"
+          }
+
+      # ------------------------------------------------------
+      # C++プロジェクトをビルド
+      # ------------------------------------------------------
+      - name: Build solution
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Continue"
+          Write-Host "========================================"
+          Write-Host "C++プロジェクトをビルドします"
+          Write-Host "ソリューション : ${{ env.SOLUTION_FILE }}"
+          Write-Host "構成           : ${{ env.BUILD_CONFIGURATION }}"
+          Write-Host "プラットフォーム: ${{ env.BUILD_PLATFORM }}"
+          Write-Host "========================================"
 
-          msbuild $env:SOLUTION_FILE /m /t:Build /p:Configuration=$env:CONFIGURATION /p:Platform=$env:PLATFORM 2>&1 |
-            Tee-Object -FilePath msbuild.log
+          msbuild "${{ env.SOLUTION_FILE }}" `
+            /m `
+            /t:Rebuild `
+            /p:Configuration="${{ env.BUILD_CONFIGURATION }}" `
+            /p:Platform="${{ env.BUILD_PLATFORM }}" `
+            /p:PlatformToolset=v143 `
+            /verbosity:minimal
 
-          $exitCode = $LASTEXITCODE
-          if ($exitCode -ne 0) {
-            Write-Host "MSBuild failed with exit code $exitCode"
-            exit $exitCode
+          if ($LASTEXITCODE -ne 0) {
+              throw "ビルドに失敗しました。終了コード: $LASTEXITCODE"
           }
 
-      # 成功/失敗で text の中身を切り替えて Webhook に送る（Power Automate 側は triggerBody()?['text'] を投稿）
-      - name: Notify Teams
-        if: always()
+      # ------------------------------------------------------
+      # 出力フォルダの確認
+      # ------------------------------------------------------
+      - name: Check build output
         shell: pwsh
-        env:
-          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
         run: |
-          $ErrorActionPreference = "Stop"
+          $outputDirectory = "${{ env.BUILD_OUTPUT_DIRECTORY }}"
 
-          $status = "${{ job.status }}"   # success / failure / cancelled
-          $runUrl = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          Write-Host "ビルド出力先を確認します。"
+          Write-Host "出力先: $outputDirectory"
 
-          if ($status -eq "success") {
-            $text = "GitHub Actions build **$status**`n`nRepo: ${{ github.repository }}`nBranch: ${{ github.ref_name }}`nCommit: ${{ github.sha }}`nRun: $runUrl"
-          }
-          elseif ($status -eq "failure") {
-            $err = ""
+          if (-not (Test-Path $outputDirectory)) {
+              Write-Host "現在のファイル一覧:"
+              Get-ChildItem -Path . -Recurse -File |
+                Select-Object FullName
 
-            if (Test-Path "msbuild.log") {
-              # MSBuild のエラー行を抽出（必要ならパターン調整）
-              $lines = Select-String -Path "msbuild.log" -Pattern ": error " |
-                Select-Object -ExpandProperty Line
-
-              if (-not $lines) {
-                # エラー行が拾えない場合は末尾を送る
-                $lines = Get-Content "msbuild.log" -Tail 80
-              }
-
-              # Teams に貼るので長すぎないように制限
-              $err = ($lines | Select-Object -First 40) -join "`n"
-            }
-            else {
-              $err = "(msbuild.log not found)"
-            }
-
-            $text = "GitHub Actions build **$status**`n`n$err`n`nRun: $runUrl"
-          }
-          else {
-            $text = "GitHub Actions build **$status**`n`nRepo: ${{ github.repository }}`nBranch: ${{ github.ref_name }}`nCommit: ${{ github.sha }}`nRun: $runUrl"
+              throw "ビルド出力フォルダが見つかりません: $outputDirectory"
           }
 
-          $payload = @{ text = $text } | ConvertTo-Json -Depth 5
-          Invoke-RestMethod -Method Post -Uri $env:TEAMS_WEBHOOK_URL -ContentType "application/json" -Body $payload
+          Write-Host "ビルド結果:"
+          Get-ChildItem -Path $outputDirectory -Recurse -File |
+            Select-Object FullName, Length
+
+      # ------------------------------------------------------
+      # 配布用フォルダを作成
+      # ------------------------------------------------------
+      - name: Prepare artifact directory
+        shell: pwsh
+        run: |
+          $sourceDirectory = "${{ env.BUILD_OUTPUT_DIRECTORY }}"
+          $packageDirectory = "${{ env.PACKAGE_DIRECTORY }}"
+
+          if (Test-Path $packageDirectory) {
+              Remove-Item $packageDirectory -Recurse -Force
+          }
+
+          New-Item `
+            -ItemType Directory `
+            -Path $packageDirectory `
+            -Force |
+            Out-Null
+
+          Write-Host "成果物をコピーします。"
+          Write-Host "コピー元: $sourceDirectory"
+          Write-Host "コピー先: $packageDirectory"
+
+          Copy-Item `
+            -Path "$sourceDirectory\*" `
+            -Destination $packageDirectory `
+            -Recurse `
+            -Force
+
+      # ------------------------------------------------------
+      # 不要なファイルを除外
+      # 必要に応じて追加・削除してください
+      # ------------------------------------------------------
+      - name: Remove unnecessary files
+        shell: pwsh
+        run: |
+          $packageDirectory = "${{ env.PACKAGE_DIRECTORY }}"
+
+          $excludeExtensions = @(
+              "*.pdb",
+              "*.ilk",
+              "*.exp",
+              "*.lib"
+          )
+
+          foreach ($extension in $excludeExtensions) {
+              Get-ChildItem `
+                -Path $packageDirectory `
+                -Filter $extension `
+                -Recurse `
+                -File `
+                -ErrorAction SilentlyContinue |
+              Remove-Item -Force
+          }
+
+          Write-Host "配布対象ファイル:"
+          Get-ChildItem -Path $packageDirectory -Recurse -File |
+            Select-Object FullName, Length
+
+      # ------------------------------------------------------
+      # ZIPファイルを作成
+      # ------------------------------------------------------
+      - name: Create ZIP file
+        shell: pwsh
+        run: |
+          $packageDirectory = "${{ env.PACKAGE_DIRECTORY }}"
+          $zipFileName = "${{ env.ZIP_FILE_NAME }}"
+
+          if (Test-Path $zipFileName) {
+              Remove-Item $zipFileName -Force
+          }
+
+          Compress-Archive `
+            -Path "$packageDirectory\*" `
+            -DestinationPath $zipFileName `
+            -CompressionLevel Optimal
+
+          if (-not (Test-Path $zipFileName)) {
+              throw "ZIPファイルの作成に失敗しました。"
+          }
+
+          $zipFile = Get-Item $zipFileName
+
+          Write-Host "ZIPファイルを作成しました。"
+          Write-Host "ファイル名: $($zipFile.Name)"
+          Write-Host "サイズ: $($zipFile.Length) bytes"
+
+      # ------------------------------------------------------
+      # GitHub Actionsへ成果物を登録
+      # ------------------------------------------------------
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ZIP_FILE_NAME }}
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          if-no-files-found: error
